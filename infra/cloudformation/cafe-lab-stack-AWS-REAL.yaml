@@ -1,0 +1,294 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Café CloudTrail Forensics Lab — infraestructura real.
+  Crea: EC2 (Café Web Server), Security Group (solo HTTP abierto — SSH se
+  agrega manualmente por consola, Task 1.1), bucket de assets del sitio,
+  bucket + trail de CloudTrail, base/tabla de Glue + bucket de resultados
+  para consultar esos logs con Athena real, y el usuario IAM `chaos` con
+  una policy intencionalmente sobre-permisiva (esa policy ES la
+  vulnerabilidad inyectada para el lab — ver README antes de reusar este
+  template).
+  La cadena completa de la vulnerabilidad: las credenciales de `chaos`
+  quedan escritas en texto plano en la propia EC2 (mala práctica real de
+  un admin que configuró AWS CLI ahí y nunca las sacó) — quien entre por
+  SSH las encuentra y escala desde ahí hasta la cuenta de AWS.
+
+Parameters:
+  KeyPairName:
+    Type: String
+    Default: cafe-lab-key
+    Description: Nombre del key pair EC2 a crear (la clave privada queda en SSM Parameter Store).
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t3.micro, t2.micro]
+
+Resources:
+
+  # ---------------------------------------------------------------------
+  # S3 — assets del sitio (HTML + imágenes) que consume el EC2 al bootear
+  # ---------------------------------------------------------------------
+  CafeAssetsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "cafe-lab-assets-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # ---------------------------------------------------------------------
+  # S3 — destino de los logs de CloudTrail
+  # ---------------------------------------------------------------------
+  CloudTrailLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "cafe-lab-monitoring-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  CloudTrailLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CloudTrailLogsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal: { Service: cloudtrail.amazonaws.com }
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt CloudTrailLogsBucket.Arn
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal: { Service: cloudtrail.amazonaws.com }
+            Action: s3:PutObject
+            Resource: !Sub "${CloudTrailLogsBucket.Arn}/AWSLogs/${AWS::AccountId}/*"
+            Condition:
+              StringEquals: { s3:x-amz-acl: bucket-owner-full-control }
+
+  CafeTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn: CloudTrailLogsBucketPolicy
+    Properties:
+      TrailName: monitor
+      S3BucketName: !Ref CloudTrailLogsBucket
+      IsLogging: true
+      IsMultiRegionTrail: false
+      IncludeGlobalServiceEvents: true
+      EnableLogFileValidation: true
+
+  # ---------------------------------------------------------------------
+  # Athena — bucket de resultados + Glue Database/Table sobre el bucket
+  # de CloudTrail, con partition projection (no hace falta crawler ni
+  # ALTER TABLE ADD PARTITION manual: Athena calcula las particiones
+  # region/año/mes/día solas a partir del rango configurado).
+  # ---------------------------------------------------------------------
+  AthenaResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "cafe-lab-athena-results-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  CafeCloudTrailGlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: cafe_cloudtrail_forensics
+
+  CafeCloudTrailGlueTable:
+    Type: AWS::Glue::Table
+    DependsOn: CafeTrail
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref CafeCloudTrailGlueDatabase
+      TableInput:
+        Name: cloudtrail_logs_monitoring
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          "projection.enabled": "true"
+          "projection.region.type": "enum"
+          "projection.region.values": !Ref "AWS::Region"
+          "projection.date.type": "date"
+          "projection.date.range": "2026/01/01,NOW"
+          "projection.date.format": "yyyy/MM/dd"
+          "projection.date.interval": "1"
+          "projection.date.interval.unit": "DAYS"
+          "storage.location.template": !Sub "s3://${CloudTrailLogsBucket}/AWSLogs/${AWS::AccountId}/CloudTrail/${!region}/${!date}"
+        StorageDescriptor:
+          Location: !Sub "s3://${CloudTrailLogsBucket}/AWSLogs/${AWS::AccountId}/CloudTrail/"
+          InputFormat: com.amazon.emr.cloudtrail.CloudTrailInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: com.amazon.emr.hive.serde.CloudTrailSerde
+          Columns:
+            - { Name: eventversion, Type: string }
+            - { Name: useridentity, Type: "struct<type:string,principalid:string,arn:string,accountid:string,invokedby:string,accesskeyid:string,username:string>" }
+            - { Name: eventtime, Type: string }
+            - { Name: eventsource, Type: string }
+            - { Name: eventname, Type: string }
+            - { Name: awsregion, Type: string }
+            - { Name: sourceipaddress, Type: string }
+            - { Name: useragent, Type: string }
+            - { Name: requestparameters, Type: string }
+            - { Name: responseelements, Type: string }
+        PartitionKeys:
+          - { Name: region, Type: string }
+          - { Name: date, Type: string }
+
+  # ---------------------------------------------------------------------
+  # Networking — Security Group SOLO con HTTP. El SSH se agrega a mano
+  # por consola en Task 1.1, igual que en el lab original.
+  # ---------------------------------------------------------------------
+  CafeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: WebSecurityGroup - Cafe Web Server (solo HTTP al crear el stack)
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  CafeKeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Ref KeyPairName
+      KeyType: rsa
+
+  # ---------------------------------------------------------------------
+  # IAM Role del EC2 — SOLO puede leer el bucket de assets. Sin permisos
+  # de red ni de IAM. Esto es a propósito: la escalada real del lab pasa
+  # por el usuario `chaos`, no por el rol de la instancia.
+  # ---------------------------------------------------------------------
+  CafeInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: read-cafe-assets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:ListBucket]
+                Resource:
+                  - !GetAtt CafeAssetsBucket.Arn
+                  - !Sub "${CafeAssetsBucket.Arn}/*"
+
+  CafeInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref CafeInstanceRole]
+
+  CafeWebServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref CafeKeyPair
+      SecurityGroupIds: [!Ref CafeSecurityGroup]
+      IamInstanceProfile: !Ref CafeInstanceProfile
+      ImageId: "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
+      Tags:
+        - { Key: Name, Value: "Cafe Web Server" }
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          dnf install -y httpd
+          systemctl enable httpd
+          systemctl start httpd
+          mkdir -p /var/www/html/cafe
+
+          # Los assets se suben al bucket DESPUÉS de crear el stack (Paso 2 del
+          # deploy). Reintenta hasta que aparezcan, en vez de asumir un orden fijo.
+          for i in $(seq 1 30); do
+            if aws s3 cp "s3://${CafeAssetsBucket}/site/" /var/www/html/cafe/ --recursive --region ${AWS::Region}; then
+              echo "Assets copiados en el intento $i"
+              break
+            fi
+            sleep 10
+          done
+
+          chown -R apache:apache /var/www/html/cafe
+          systemctl restart httpd
+
+          # ---------------------------------------------------------------
+          # VULNERABILIDAD INYECTADA (capa 1): credenciales del usuario
+          # `chaos` quedan en texto plano en el home del usuario por
+          # defecto de la AMI, simulando un admin que configuró AWS CLI
+          # ahí para alguna tarea puntual y nunca las rotó/borró. Quien
+          # comprometa el host por SSH (Task manual, ver README) las
+          # encuentra con un simple `cat ~/.aws/credentials`.
+          # ---------------------------------------------------------------
+          mkdir -p /home/ec2-user/.aws
+          cat > /home/ec2-user/.aws/credentials << 'EOC'
+          [default]
+          aws_access_key_id = ${ChaosAccessKey}
+          aws_secret_access_key = ${ChaosAccessKey.SecretAccessKey}
+          EOC
+          chown -R ec2-user:ec2-user /home/ec2-user/.aws
+          chmod 600 /home/ec2-user/.aws/credentials
+
+  # ---------------------------------------------------------------------
+  # IAM del "atacante" — usuario chaos con la vulnerabilidad INYECTADA:
+  # una policy sobre-permisiva (ec2:* en vez de acotarla a los 2-3 verbos
+  # que realmente necesitaría). Esta policy ES el hallazgo del incidente.
+  # ---------------------------------------------------------------------
+  ChaosUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: chaos
+
+  ChaosOverPermissivePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: cafe-lab-INJECTED-overpermissive-ec2
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: "ec2:*"
+            Resource: "*"
+      Users: [!Ref ChaosUser]
+
+  ChaosAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref ChaosUser
+
+Outputs:
+  WebServerPublicIp:
+    Value: !GetAtt CafeWebServer.PublicIp
+  CafeAssetsBucketName:
+    Value: !Ref CafeAssetsBucket
+  CloudTrailLogsBucketName:
+    Value: !Ref CloudTrailLogsBucket
+  AthenaResultsBucketName:
+    Value: !Ref AthenaResultsBucket
+  GlueDatabaseName:
+    Value: !Ref CafeCloudTrailGlueDatabase
+  SecurityGroupId:
+    Value: !Ref CafeSecurityGroup
+  KeyPairId:
+    Value: !GetAtt CafeKeyPair.KeyPairId
+  ChaosUserArn:
+    Value: !GetAtt ChaosUser.Arn
+  ChaosAccessKeyId:
+    Value: !Ref ChaosAccessKey
+  ChaosSecretAccessKey:
+    Value: !GetAtt ChaosAccessKey.SecretAccessKey
+    Description: "SENSIBLE — solo vos la ves via describe-stacks. Guardala y luego rota/borrá el usuario al cerrar el lab."

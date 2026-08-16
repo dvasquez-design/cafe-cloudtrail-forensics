@@ -1,0 +1,5 @@
+[
+  { "ParameterKey": "KeyPairName", "ParameterValue": "cafe-lab-key" },
+  { "ParameterKey": "InstanceType", "ParameterValue": "t3.micro" },
+  { "ParameterKey": "PublicKeyMaterial", "ParameterValue": "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC/YrkJN2xrEgfylEKvdTowKLoVmEeiwMDSXl3tXU/kZC+UbEIwtvQ6Ei2DRfjXZUlp5OsE8UVahgzTA9drpxaJUPInuszw3L0tk7QuK0dMH9s5WFO3k3VVOImN8BHolX0iA9vgSPwR8h6wq0CtP6o2pAS61nYW4Ku62gBEwtJWLFhDZ78b6iNqRMxmDDnEmrVJIEH4s/Cb3dto1cS70qvaPg36ZWbz6rruKhqA0cuf4ff2tY/ZrYJz7mMjIm16GTmnCOWxraGx+p8bn0/RAoXpwbqmIvHPg1pDKEWeFdhoHiNcb+7je8EWd+S1Kc6Fgy8Og0ckh0KOVQ18zT3fO9ISDzZPBdmNe1x/uL3MkGRzXfXM9KISzWpaURN0nB8hUzIlLCU4s1E+FZogL91dwHjcgQisWL/qITZyOICN2DedrsFZI/18pIoXX0mpOlMLDIzkLghQSg6e/Apalx9CS5xEcFY8AUnfEgRnDU7sICffQKG9iXH0Mv/BhwPnywuOObM= diego@wonderland" }
+]
