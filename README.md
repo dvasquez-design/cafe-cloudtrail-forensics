@@ -61,12 +61,13 @@ The template deploys:
 
 The full vulnerability chain: `chaos`'s credentials are left in plaintext on the EC2 instance itself → whoever gets in via SSH finds them → escalates from there to whatever scope the over-permissive policy allows.
 
-## Two ways to run it
+## How it runs
 
-- **Real AWS:** the template runs unmodified — `infra/cloudformation/cafe-lab-stack.yaml`.
-- **Floci (local emulator, no cost):** adapted version at `infra/cloudformation/cafe-lab-stack-floci.yaml`, with 3 compatibility adjustments (AMI, instance type, key pair import) and a full reproducible guide at `docs/floci-session/GUIA-floci-cafe-lab.md`.
+This lab currently runs against **Floci** (local AWS emulator, no cost) — `infra/cloudformation/cafe-lab-stack-floci.yaml`, with 3 compatibility adjustments (AMI, instance type, key pair import) and a full reproducible guide at `docs/floci-session/GUIA-floci-cafe-lab.md`.
 
-The run against Floci was documented end-to-end in `docs/floci-session/bitacora-cafe-floci.md`, including **12 emulator gaps** found along with their workarounds (CloudTrail not delivering logs, Athena not syncing with Glue, container IPs changing on restart, among others). The real template is left untouched — the workarounds only apply to the local version.
+The run was documented end-to-end in `docs/floci-session/bitacora-cafe-floci.md`, including **12 emulator gaps** found along with their workarounds (CloudTrail not delivering logs, Athena not syncing with Glue, container IPs changing on restart, among others).
+
+**Planned:** a deployment against a real AWS account, to validate the same scenario without emulator limitations.
 
 ## Forensic investigation
 
